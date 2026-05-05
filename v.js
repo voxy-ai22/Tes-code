@@ -8,11 +8,12 @@ const path     = require('path');
 const readline = require('readline');
 
 // ================================================================
-//   OTAKUDESU Batch Scraper CLI v4.0
-//   - Parser diperbaiki: selector lebih akurat
+//   OTAKUDESU Batch Scraper CLI v5.0
+//   - Parser diperbaiki: selector lebih akurat berdasarkan struktur HTML nyata
 //   - Ambil semua field: judul, japanese, type, episode, rating,
 //     genre, duration, studios, producers, aired, credit, sinopsis
-//   - Download link lebih lengkap
+//   - Thumbnail fix: selector akurat .imganime img.wp-post-image
+//   - Download link lebih lengkap dengan resolusi dan size
 // ================================================================
 
 const CFG = {
@@ -82,7 +83,7 @@ function banner() {
   console.log('  ║   ░█──█ ──█── ░█▄▄█ █▀▄ █──█ ░█─░█ █▀▀ ▀▀█ █─█        ║');
   console.log('  ║   ░█▄▄█ ──▀── ░█─░█ ▀─▀ ─▀▀▀ ░█▄▄▀ ▀▀▀ ▀▀▀ ─▀─        ║');
   console.log('  ║                                                          ║');
-  console.log('  ║    Batch Scraper CLI  ─  v4.0  🎌  Termux Edition        ║');
+  console.log('  ║    Batch Scraper CLI  ─  v5.0  🎌  Termux Edition        ║');
   console.log('  ║    Parser Diperbaiki: Ambil Semua Field Otakudesu        ║');
   console.log('  ║                                                          ║');
   console.log('  ╚══════════════════════════════════════════════════════════╝');
@@ -138,25 +139,31 @@ async function fetchHtml(url) {
 }
 
 // ──────────────────────────────────────────────
-// PARSER OTAKUDESU v4 — Selector Diperbaiki
+// PARSER OTAKUDESU v5 — Selector Akurat
 // Berdasarkan struktur HTML otakudesu yang sesungguhnya:
-//   - Info field ada di dalam <div class="infozingle"> > <p>
-//   - Setiap <p> berisi <b>Key</b> : Value
-//   - Sinopsis ada di <div class="sinopc">
-//   - Download links ada di <div class="episodelist"> atau
-//     tabel download per resolusi
+//   - Judul: <h1> di dalam .jdlrx
+//   - Thumbnail: <img class="wp-post-image"> di dalam .imganime
+//   - Info: <div class="infos"> dengan <b>Key</b>: Value<br />
+//   - Sinopsis: <div class="deskripsi"><b>Sinopsis:</b>...<div style="text-align: justify;">...</div></div>
+//   - Download: <div class="download2"> > <div class="batchlink"> > <ul><li><strong>Reso</strong> <a href="...">Host</a> <i>size</i></li></ul>
 // ──────────────────────────────────────────────
 function parse($, url) {
   // ── Judul ──────────────────────────────────
   const judul =
+    $('.jdlrx h1').text().trim() ||
+    $('.venser h1').first().text().trim() ||
     $('h1.entry-title').text().trim() ||
-    $('h1.jdlz').text().trim()         ||
-    $('h1').first().text().trim()      ||
+    $('h1').first().text().trim() ||
     'Tidak ditemukan';
 
   // ── Thumbnail ──────────────────────────────
+  // Prioritas selector berdasarkan struktur HTML otakudesu
   let thumb = null;
   const thumbSelectors = [
+    '.imganime img.wp-post-image',      // selector utama otakudesu
+    '.imganime img',
+    'img.attachment-post-thumbnail',
+    'img.wp-post-image',
     '.fotoanime img',
     '.thumb img',
     '.anime-thumb img',
@@ -165,13 +172,14 @@ function parse($, url) {
     '.dtlimgcon img',
   ];
   for (const sel of thumbSelectors) {
-    const src = $(sel).first().attr('src') || $(sel).first().attr('data-src');
+    const img = $(sel).first();
+    const src = img.attr('src') || img.attr('data-src') || img.attr('data-lazy-src');
     if (src) { thumb = src; break; }
   }
-  // fallback: cari img yang namanya mengandung kata kunci cover/poster
+  // fallback: cari img terbesar yang mengandung kata kunci anime/cover/poster
   if (!thumb) {
     $('img').each((_, el) => {
-      const src = $(el).attr('src') || $(el).attr('data-src') || '';
+      const src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src') || '';
       if (/cover|poster|thumb|anime/i.test(src) && /\.(jpe?g|png|webp)/i.test(src)) {
         thumb = src; return false;
       }
@@ -179,17 +187,19 @@ function parse($, url) {
   }
 
   // ── Info Fields (struktur utama otakudesu) ──
-  // Selector utama: .infozingle p  → <p><b>Judul</b> <b>:</b> Spy x Family</p>
+  // Selector utama: .infos  → <b>Key</b>: Value<br />
   const info = {};
 
   const parseInfoEl = (el) => {
     const $el  = $(el);
-    // Ambil teks <b> sebagai key, sisa teks sebagai value
+    // Ambil teks <b> sebagai key
     const bTag = $el.find('b').first().text().trim().replace(/[:：]/g,'').trim();
     // Hapus semua <b> lalu ambil teks sisanya
     const clone = $el.clone();
     clone.find('b').remove();
-    const val = clone.text().replace(/^[\s:：]+/, '').trim();
+    // Also remove <a> tags (genre links) but keep their text
+    clone.find('a').each(function() { $(this).replaceWith($(this).text()); });
+    let val = clone.text().replace(/^[\s:：]+/, '').trim();
     if (bTag && val && !info[bTag.toLowerCase()]) {
       info[bTag.toLowerCase()] = val;
     }
@@ -197,9 +207,9 @@ function parse($, url) {
 
   // Coba berbagai selector container info
   const infoContainers = [
-    '.infozingle p',       // struktur paling umum
+    '.infos',              // struktur paling umum otakudesu
+    '.infozingle p',
     '.infoanime p',
-    '.infos p',
     '.infov1 p',
     '.info-anime p',
     '.anime-info p',
@@ -243,54 +253,87 @@ function parse($, url) {
   };
 
   // ── Sinopsis ───────────────────────────────
-  // otakudesu pakai class .sinopc atau .sinopsis
+  // otakudesu pakai class .deskripsi
   let synopsis = null;
   const synSelectors = [
+    '.deskripsi',
     '.sinopc',
     '.sinopsis',
     '.synopsis',
     '[itemprop="description"]',
     '#desc',
     '.desc',
-    '.deskripsi',
+    '.deskripsi-anime',
   ];
   for (const sel of synSelectors) {
-    const t = $(sel).text().trim().replace(/\s+/g,' ');
-    if (t.length > 50) { synopsis = t.slice(0, 2000); break; }
+    const $el = $(sel);
+    if ($el.length === 0) continue;
+    // Remove the "Sinopsis:" label if present
+    let t = $el.text().trim().replace(/\s+/g,' ');
+    t = t.replace(/^Sinopsis:\s*/i, '');
+    if (t.length > 20) { synopsis = t.slice(0, 2000); break; }
   }
 
   // ── Download Links ─────────────────────────
-  // otakudesu: link download ada di tabel per episode/batch
-  // biasanya class: .episodelist, .download, .dl-link, tabel resolusi
+  // otakudesu: link download ada di .download2 > .batchlink > ul > li
   const dlLinks = [];
   const seenHref = new Set();
 
-  // Cari semua link yang terlihat seperti download
-  $('a[href]').each((_, el) => {
-    const href  = $(el).attr('href') || '';
-    const label = $(el).text().trim() || '';
-    const title = $(el).attr('title') || '';
+  // Primary: .download2 .batchlink structure
+  $('.download2 .batchlink ul li, .download ul li, .batchlink ul li').each((_, el) => {
+    const $li = $(el);
+    const resolution = $li.find('strong').first().text().trim();
+    const size = $li.find('i').first().text().trim();
 
-    if (!href.startsWith('http')) return;
-    if (seenHref.has(href)) return;
+    $li.find('a[href]').each((_, aEl) => {
+      const $a = $(aEl);
+      const href  = $a.attr('href') || '';
+      const label = $a.text().trim() || '';
 
-    const isDownload =
-      /\.(mkv|mp4|avi|zip|rar|7z)(\?|$)/i.test(href) ||  // ekstensi file
-      /\/(dl|download|unduh)\//i.test(href) ||             // path /dl/
-      /mega\.nz|mediafire|gdrive|drive\.google|zippyshare|pixeldrain|krakenfiles|racaty|acefile|letsupload|solidfiles|upstream|streamlare|gofile|1fichier/i.test(href) || // hosting populer
-      /batch|episode|eps|ep\d/i.test(label + title);      // label
+      if (!href.startsWith('http')) return;
+      if (seenHref.has(href)) return;
 
-    if (isDownload) {
       seenHref.add(href);
       dlLinks.push({
-        label: label || title || new URL(href).hostname,
+        label: label,
+        resolution: resolution,
+        size: size,
         url:   href,
         host:  (() => { try { return new URL(href).hostname; } catch { return '?'; } })(),
       });
-    }
+    });
   });
 
-  // ── Resolusi / kualitas (240p, 360p, 480p, 720p, 1080p) ──
+  // Fallback: cari semua link yang terlihat seperti download
+  if (dlLinks.length === 0) {
+    $('a[href]').each((_, el) => {
+      const href  = $(el).attr('href') || '';
+      const label = $(el).text().trim() || '';
+      const title = $(el).attr('title') || '';
+
+      if (!href.startsWith('http')) return;
+      if (seenHref.has(href)) return;
+
+      const isDownload =
+        /\.(mkv|mp4|avi|zip|rar|7z)(\?|$)/i.test(href) ||
+        /\/(dl|download|unduh)\//i.test(href) ||
+        /mega\.nz|mediafire|gdrive|drive\.google|zippyshare|pixeldrain|krakenfiles|racaty|acefile|letsupload|solidfiles|upstream|streamlare|gofile|1fichier/i.test(href) ||
+        /batch|episode|eps|ep\d/i.test(label + title);
+
+      if (isDownload) {
+        seenHref.add(href);
+        dlLinks.push({
+          label: label || title || new URL(href).hostname,
+          resolution: '',
+          size: '',
+          url:   href,
+          host:  (() => { try { return new URL(href).hostname; } catch { return '?'; } })(),
+        });
+      }
+    });
+  }
+
+  // ── Resolusi / kualitas ──
   const resolutions = [];
   $('[class*="resolution"],[class*="quality"],[class*="reso"]').each((_, el) => {
     const t = $(el).text().trim();
@@ -307,15 +350,14 @@ function parse($, url) {
     });
   }
 
-  // ── Jumlah episode (kadang ada di badge terpisah) ──
+  // ── Jumlah episode ──
   let totalEp = g('episode','episodes','total episode','jumlah episode','eps');
   if (!totalEp) {
-    // Coba cari dari badge / kotak episode count
-    const badge = $('.epbadge,.total-eps,.episode-count,.jumlah-episode').text().trim();
+    const badge = $('.epbadge,.total-eps,.episode-count,.jumlah-episode,.totalepisode .total').text().trim();
     if (badge) totalEp = badge;
   }
 
-  // ── Score/Rating dari badge MyAnimeList atau sumber lain ──
+  // ── Score/Rating ──
   let rating = g('rating','score','skor','mal score','myanimelist');
   if (!rating) {
     $('[class*="score"],[class*="rating"],[class*="mal"]').each((_, el) => {
@@ -324,11 +366,11 @@ function parse($, url) {
     });
   }
 
-  // ── Genre (bisa berupa list link) ──
+  // ── Genre ──
   let genre = g('genre','genres','kategori','category');
   if (!genre) {
     const genreLinks = [];
-    $('a[href*="/genre/"], a[href*="/category/"]').each((_, el) => {
+    $('a[href*="/genre/"], a[href*="/genres/"], a[href*="/category/"]').each((_, el) => {
       const t = $(el).text().trim();
       if (t && !genreLinks.includes(t)) genreLinks.push(t);
     });
@@ -401,7 +443,7 @@ function saveMarkdown(data, outPath) {
   try {
     const f  = (k, v) => `| ${k} | ${v || '—'} |`;
     const dl = data.downloadLinks.length
-      ? data.downloadLinks.map(l => `- [${l.label}](${l.url})  \`${l.host}\``).join('\n')
+      ? data.downloadLinks.map(l => `- [${l.label}${l.resolution ? ' (' + l.resolution + ')' : ''}${l.size ? ' ' + l.size : ''}](${l.url})  \`${l.host}\``).join('\n')
       : '_Tidak ditemukan_';
 
     const md = [
@@ -496,7 +538,9 @@ function printResult(data, outDir) {
     console.log(x.wn('     Tidak ada link download terdeteksi'));
   } else {
     data.downloadLinks.slice(0, 8).forEach(l => {
-      console.log(`     ${C.cyn}›${C.r} ${l.label}`);
+      const reso = l.resolution ? ` ${l.resolution}` : '';
+      const size = l.size ? ` ${l.size}` : '';
+      console.log(`     ${C.cyn}›${C.r} ${l.label}${reso}${size}`);
       console.log(`       ${C.d}[${l.host}]  ${l.url.slice(0,70)}${l.url.length>70?'…':''}${C.r}`);
     });
     if (data.downloadLinks.length > 8)
